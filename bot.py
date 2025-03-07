@@ -13,20 +13,25 @@ PREFIX = "!"
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("discord")
 
+# Load the environment variables
 load_dotenv('.env')
-logger.info("Loaded environment from .env.local")
+logger.info("Loaded environment from .env")
 
 # Check if token is available
 token = os.getenv("DISCORD_TOKEN")
 if not token:
-    logger.error("DISCORD_TOKEN not found in environment variables. Make sure your .env or .env.local file contains the token.")
+    logger.error("DISCORD_TOKEN not found in environment variables. Make sure your .env file contains the token.")
     exit(1)
 
 # Check if mistral key is available
 mistral_key = os.getenv("MISTRAL_API_KEY")
 if not mistral_key:
-    logger.error("MISTRAL_API_KEY not found in environment variables. Make sure your .env or .env.local file contains the API key.")
+    logger.error("MISTRAL_API_KEY not found in environment variables. Make sure your .env file contains the API key.")
     exit(1)
+
+# Set API keys for Google Maps and Yelp
+os.environ["GOOGLE_MAPS_API_KEY"] = os.getenv("GOOGLE_MAPS_API_KEY")
+os.environ["YELP_API_KEY"] = os.getenv("YELP_API_KEY")
     
 # Create the bot with all intents
 intents = discord.Intents.all()
@@ -45,7 +50,7 @@ async def on_ready():
     Prints message on terminal when bot successfully connects to discord.
     """
     logger.info(f"{bot.user} has connected to Discord!")
-    await bot.change_presence(activity=discord.Game(name="Planning your next trip! Type something to start."))
+    await bot.change_presence(activity=discord.Game(name="Planning your next trip! Type !plan to start."))
 
 @bot.event
 async def on_message(message: discord.Message):
@@ -97,7 +102,17 @@ I'm your AI travel planning assistant! Here's how I can help you plan your next 
 - Create personalized itineraries
 - Offer tips on budgeting, packing, and travel safety
 
-Just start chatting with me about your travel plans or ideas! The more details you provide, the better I can assist you.
+**Planning Process:**
+1. First, I'll ask about your destination(s)
+2. Then, your travel dates
+3. Next, your travel preferences (luxury, adventure, etc.)
+4. Whether you want accommodation recommendations
+5. Finally, your food preferences
+
+**Commands:**
+`!plan` - Start a new travel planning session
+`!clear` - Clear your conversation history
+`!help` - Show this help message
 
 **Example questions:**
 • "I want to plan a 5-day trip to Japan in October. What should I see?"
@@ -115,9 +130,50 @@ async def clear_history(ctx):
     user_id = str(ctx.author.id)
     if user_id in agent.conversation_history:
         agent.conversation_history[user_id] = []
+        # Also reset travel data
+        if user_id in agent.travel_data:
+            agent.travel_data[user_id] = {
+                "stage": 0,  # initial stage
+                "locations": [],
+                "dates": {},
+                "preferences": [],
+                "accommodation": {},
+                "food": {},
+                "itinerary": {}
+            }
         await ctx.send("Your conversation history has been cleared! Let's start fresh with your travel plans.")
     else:
         await ctx.send("You don't have any conversation history yet.")
+
+
+@bot.command(name="plan", help="Start a new travel plan.")
+async def start_plan(ctx):
+    """Start a new travel planning session."""
+    user_id = str(ctx.author.id)
+    
+    # Clear any existing conversation
+    agent.conversation_history[user_id] = []
+    
+    # Reset travel data
+    agent.travel_data[user_id] = {
+        "stage": 0,  # INITIAL stage
+        "locations": [],
+        "dates": {},
+        "preferences": [],
+        "accommodation": {},
+        "food": {},
+        "itinerary": {}
+    }
+    
+    # Start with the initial prompt
+    initial_prompt = """
+**🌍 Let's Plan Your Trip! 🧳**
+
+I'll help you create a personalized travel itinerary. To get started, I'll need some information:
+
+1️⃣ What location(s) are you interested in visiting? (You can list multiple places)
+"""
+    await ctx.send(initial_prompt)
 
 
 # Start the bot, connecting it to the gateway
