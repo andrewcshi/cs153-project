@@ -233,7 +233,7 @@ I'll help you create a personalized travel itinerary. To get started, I'll need 
         "Riyadh", 
         "London", 
         "Rome",
-        "Bhutan",
+        "Thimphu",
     ]
     
     # Define a callback for when a button is pressed
