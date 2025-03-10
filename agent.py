@@ -194,23 +194,29 @@ class MistralAgent:
             
             # Create a message with the API data
             api_data_message = f"""
-Here is real data from APIs to help with recommendations:
+------------------------------------------------------------
+API DATA FOR ITINERARY ENRICHMENT
+------------------------------------------------------------
+Below is the latest data from our APIs. Integrate these details into the itinerary you generate. When including this data, ensure that your output follows the template exactly.
 
-ATTRACTIONS:
+------------------------------------------------------------
+Attraction Data:
 {json.dumps([{
     "name": a.get("name", "Unknown"),
     "rating": a.get("rating", "N/A"),
     "address": a.get("vicinity", "N/A")
 } for a in data_context["attractions"]], indent=2)}
 
-HOTELS:
+------------------------------------------------------------
+Hotel Data:
 {json.dumps([{
     "name": h.get("name", "Unknown"),
     "rating": h.get("rating", "N/A"),
     "address": h.get("vicinity", "N/A")
 } for h in data_context["hotels"]], indent=2)}
 
-RESTAURANTS:
+------------------------------------------------------------
+Restaurant Data:
 {json.dumps([{
     "name": r.get("name", "Unknown"),
     "rating": r.get("rating", "N/A"),
@@ -218,8 +224,15 @@ RESTAURANTS:
     "cuisine": [c.get("title") for c in r.get("categories", [])]
 } for r in data_context["restaurants"]], indent=2)}
 
-Use this real data to enhance your itinerary recommendations. Include specific attraction names, hotels, and restaurants in your response.
+------------------------------------------------------------
+When updating the itinerary:
+- Follow the exact output template provided in the itinerary prompt.
+- Insert API data by selecting specific names, ratings, and addresses into the relevant sections (e.g., under **Attraction:** or **Hotel:**).
+- Ensure your final itinerary output includes the horizontal dividers and clear labels as specified in the template.
+
+Incorporate these details to produce a structured and visually engaging itinerary.
 """
+
             
             # Get an enhanced response using the API data
             messages = [
@@ -383,55 +396,59 @@ Use this real data to enhance your itinerary recommendations. Include specific a
             await channel.send(modified_content)
     
     async def run(self, message: discord.Message):
-        """Process a message and generate a response using conversation history."""
         user_id = str(message.author.id)
         user_content = message.content
-        
+
+        # Optional: If the user is at the ITINERARY stage, clear the conversation history
+        # to ensure that the new strict prompt is not diluted by older messages.
+        if self.travel_data[user_id]["stage"] == PLANNING_STAGES["ITINERARY"]:
+            self.conversation_history[user_id] = []  # reset history for a fresh context
+
         # Add the user message to history
         self.add_to_history(user_id, "user", user_content)
-        
+
         # Update user travel data
         self.extract_travel_information(user_id, user_content)
-        
+
         # Create contextual prompt based on travel data
         context_prompt = self.get_context_prompt(user_id)
-        
-        # Construct messages with system prompt, history and context
+
+        # Construct messages with system prompt, extra instructions, and full (or truncated) history
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": "Below is the complete conversation history to help structure the final itinerary:"},
             {"role": "system", "content": context_prompt}
         ]
-        messages.extend(self.get_history(user_id))
-        
+        # Optionally, truncate history if it's too long
+        full_history = self.get_history(user_id)
+        if len(full_history) > MAX_HISTORY * 2:
+            full_history = full_history[-(MAX_HISTORY * 2):]
+        messages.extend(full_history)
+
         # Get response from Mistral
         response = await self.client.chat.complete_async(
             model=MISTRAL_MODEL,
             messages=messages,
         )
-        
+
         assistant_content = response.choices[0].message.content
-        
-        # Check if we should enhance the response with API data
+
+        # Enhance the response with API data if in ITINERARY stage
         enhanced_content = await self.enhance_response_with_api_data(user_id, assistant_content)
-        
-        # Check if we should add button options
-        modified_content, button_options = self.get_button_options(user_id, enhanced_content)
-        
-        # Add the assistant's response to history
+
+        # Add the assistant's (final) response to the conversation history
         self.add_to_history(user_id, "assistant", enhanced_content)
-        
-        # If we have button options, send them with the message
+
+        # Check if we should add button options and send accordingly
+        modified_content, button_options = self.get_button_options(user_id, enhanced_content)
         if button_options:
-            # Define a callback for when a button is pressed
             async def button_callback(interaction, option):
                 await self.process_button_selection(interaction, option, user_id, message.channel)
-            
-            # Send the message with buttons
             await send_buttons_message(message, modified_content, button_options, button_callback)
-            return ""  # Return empty string since we've already sent the message
-        
+            return ""  # Return empty string since message has been sent
+
         return enhanced_content
-    
+
     def extract_travel_information(self, user_id, message):
         """Extract travel information from user message and update travel data."""
         user_data = self.travel_data[user_id]
@@ -518,16 +535,47 @@ Use this real data to enhance your itinerary recommendations. Include specific a
             
         elif stage == PLANNING_STAGES["ITINERARY"]:
             return f"""
-The user has provided all necessary information for a travel plan. Create a detailed itinerary for them.
+------------------------------------------------------------
+FINAL ITINERARY REQUEST
+------------------------------------------------------------
+You must generate a detailed day-by-day itinerary using markdown that follows the exact structure below. Do not deviate from this format:
 
-Their preferences:
-Locations: {', '.join(user_data['locations']) if user_data['locations'] else 'Not specified'}
-Dates: {user_data['dates'].get('raw', 'Not specified')}  
-Travel Preferences: {', '.join(user_data['preferences']) if user_data['preferences'] else 'Not specified'}
-Accommodation: {user_data['accommodation'].get('preferences', 'Not specified')}
-Food: {user_data['food'].get('preferences', 'Not specified')}
+------------------------------------------------------------
+[TEMPLATE START]
 
-Create a detailed day-by-day itinerary with specific recommendations for attractions, hotels, and restaurants.
+**DAY [NUMBER]**  
+------------------------------------------------------------
+**Date:** [Insert Date or Time Block, e.g., "June 15th, Morning"]  
+**Activity:** [Insert main activity, e.g., "Arrival and Check-in"]  
+**Details:**  
+- **Hotel:** [Insert hotel name] - [Insert booking hyperlink if available, e.g., "[Reserve Now](#)"]  
+- **Restaurant:** [Insert restaurant name] - [Insert booking hyperlink if available]  
+- **Attraction:** [Insert attraction/experience name]  
+- **Time:** [Insert time block, e.g., "10:30 AM – 12:00 PM"]  
+- **Alternative Option:** [Optional alternative choice]
+
+Repeat this block for each day.
+
+[TEMPLATE END]
+------------------------------------------------------------
+Formatting Requirements:
+- Use **bullet points** for lists.
+- Use horizontal lines (a series of dashes "------------------------------------------------------------") to separate sections.
+- Use clear labels exactly as shown (e.g., **Hotel:**, **Restaurant:**, **Attraction:**, **Date:**, **Activity:**, **Time:**).
+- Do not include any emojis; only use text-based labels.
+- Ensure that all booking hyperlinks are included as placeholders (e.g., `[Reserve Now](#)`) where applicable.
+- Your final output must strictly follow the template above.
+
+------------------------------------------------------------
+User Preferences:
+- **Locations:** {', '.join(user_data['locations']) if user_data['locations'] else 'Not specified'}
+- **Dates:** {user_data['dates'].get('text', 'Not specified')}
+- **Travel Preferences:** {', '.join(user_data['preferences']) if user_data['preferences'] else 'Not specified'}
+- **Accommodation Preference:** {user_data['accommodation'].get('preference', 'Not specified')}
+- **Food Preference:** {user_data['food'].get('preference', 'Not specified')}
+
+------------------------------------------------------------
+Generate the itinerary exactly following the template above, ensuring clear section dividers and all required labels.
 """
-        
+
         return "Continue helping the user plan their trip."
