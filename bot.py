@@ -5,7 +5,8 @@ import asyncio
 
 from discord.ext import commands
 from dotenv import load_dotenv
-from agent import MistralAgent
+from agent import MistralAgent, SYSTEM_PROMPT, MISTRAL_MODEL
+from button_utils import send_buttons_message
 
 PREFIX = "!"
 
@@ -146,6 +147,55 @@ async def clear_history(ctx):
         await ctx.send("You don't have any conversation history yet.")
 
 
+# Helper function to process button selections
+async def process_button_selection(interaction, option, author, channel):
+    """Process a button selection and generate a response."""
+    user_id = str(author.id)
+    
+    # Generate a response to the selection
+    context_prompt = agent.get_context_prompt(user_id)
+    
+    # Construct messages with system prompt, history and context
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": context_prompt}
+    ]
+    messages.extend(agent.get_history(user_id))
+    
+    # Get response from Mistral
+    response = await agent.client.chat.complete_async(
+        model=MISTRAL_MODEL,
+        messages=messages,
+    )
+    
+    assistant_content = response.choices[0].message.content
+    
+    # Check if we should enhance the response with API data
+    enhanced_content = await agent.enhance_response_with_api_data(user_id, assistant_content)
+    
+    # Check if we should add button options
+    modified_content, new_button_options = agent.get_button_options(user_id, enhanced_content)
+    
+    # Add the assistant's response to history
+    agent.add_to_history(user_id, "assistant", enhanced_content)
+    
+    # Get the actual channel object if we have an interaction
+    if hasattr(interaction, 'channel') and interaction.channel:
+        channel = interaction.channel
+    
+    # Send the response
+    if new_button_options:
+        # Define a new callback for the buttons in this response
+        async def next_button_callback(interaction, option):
+            # Process the selected option
+            agent.add_to_history(user_id, "user", option)
+            agent.extract_travel_information(user_id, option)
+            await process_button_selection(interaction, option, author, channel)
+        
+        await send_buttons_message(channel, modified_content, new_button_options, next_button_callback)
+    else:
+        await channel.send(modified_content)
+
 @bot.command(name="plan", help="Start a new travel plan.")
 async def start_plan(ctx):
     """Start a new travel planning session."""
@@ -173,7 +223,81 @@ I'll help you create a personalized travel itinerary. To get started, I'll need 
 
 1️⃣ What location(s) are you interested in visiting? (You can list multiple places)
 """
-    await ctx.send(initial_prompt)
+    
+    # Define popular destinations as button options
+    popular_destinations = [
+        "Paris",
+        "Seoul",  
+        "New York",
+        "Palo Alto",
+        "Riyadh", 
+        "London", 
+        "Rome",
+        "Thimphu",
+    ]
+    
+    # Define a callback for when a button is pressed
+    async def destination_callback(interaction, option):
+        # Get the user ID
+        user_id = str(ctx.author.id)
+        
+        # Add the user's selection to history
+        agent.add_to_history(user_id, "user", f"I want to visit {option}")
+        
+        # Update travel data based on the selection
+        agent.travel_data[user_id]["locations"].append(option)
+        agent.travel_data[user_id]["stage"] = 2  # Move to DATES stage
+        
+        # Generate a response to the selection
+        context_prompt = agent.get_context_prompt(user_id)
+        
+        # Construct messages with system prompt, history and context
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": context_prompt}
+        ]
+        messages.extend(agent.get_history(user_id))
+        
+        # Get response from Mistral
+        response = await agent.client.chat.complete_async(
+            model=MISTRAL_MODEL,
+            messages=messages,
+        )
+        
+        assistant_content = response.choices[0].message.content
+        
+        # Check if we should enhance the response with API data
+        enhanced_content = await agent.enhance_response_with_api_data(user_id, assistant_content)
+        
+        # Check if we should add button options
+        modified_content, new_button_options = agent.get_button_options(user_id, enhanced_content)
+        
+        # Add the assistant's response to history
+        agent.add_to_history(user_id, "assistant", enhanced_content)
+        
+        # Get the channel from the interaction
+        channel = interaction.channel
+        
+        # Send the response
+        if new_button_options:
+            # Define a new callback for the buttons in this response
+            async def next_button_callback(interaction, option):
+                # Process the selected option
+                agent.add_to_history(user_id, "user", option)
+                agent.extract_travel_information(user_id, option)
+                await process_button_selection(interaction, option, ctx.author, channel)
+            
+            await send_buttons_message(channel, modified_content, new_button_options, next_button_callback)
+        else:
+            await channel.send(modified_content)
+    
+    # Send the message with buttons
+    await send_buttons_message(
+        ctx, 
+        initial_prompt + "\n\n*Or select a popular destination:*", 
+        popular_destinations,
+        destination_callback
+    )
 
 
 # Start the bot, connecting it to the gateway

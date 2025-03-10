@@ -4,10 +4,12 @@ from mistralai import Mistral
 import discord
 from collections import defaultdict
 import asyncio
+import re
 
 # Import our API services
 from google_maps_service import GoogleMapsService
 from yelp_service import YelpService
+from button_utils import send_buttons_message
 
 MISTRAL_MODEL = "mistral-large-latest"
 SYSTEM_PROMPT = """You are TravelBuddy, an expert travel planning assistant.
@@ -240,6 +242,146 @@ Use this real data to enhance your itinerary recommendations. Include specific a
         
         return response
     
+    def get_button_options(self, user_id, response):
+        """
+        Extract potential button options from the response based on the current planning stage.
+        
+        Args:
+            user_id: The user ID
+            response: The response from the LLM
+            
+        Returns:
+            A tuple of (modified_response, button_options) if buttons should be shown,
+            or (original_response, None) if no buttons are needed
+        """
+        user_data = self.travel_data[user_id]
+        current_stage = user_data["stage"]
+        
+        # Predefined options for each stage
+        predefined_options = {
+            PLANNING_STAGES["INITIAL"]: [],  # Handled in bot.py
+            PLANNING_STAGES["LOCATION"]: [],  # Handled in bot.py
+            PLANNING_STAGES["DATES"]: [
+                "Next week", 
+                "Next month", 
+                "This summer", 
+                "This winter", 
+                "Flexible"
+            ],
+            PLANNING_STAGES["PREFERENCES"]: [
+                "Luxury", 
+                "Budget-friendly", 
+                "Adventure", 
+                "Cultural", 
+                "Family-friendly"
+            ],
+            PLANNING_STAGES["ACCOMMODATION"]: [
+                "Hotel", 
+                "Airbnb", 
+                "Resort", 
+                "Hostel", 
+                "Vacation rental"
+            ],
+            PLANNING_STAGES["FOOD"]: [
+                "Local cuisine", 
+                "Fine dining", 
+                "Street food", 
+                "Vegetarian", 
+                "All options"
+            ]
+        }
+        
+        # Define patterns to look for options in the response
+        option_patterns = {
+            PLANNING_STAGES["PREFERENCES"]: [
+                r"(?:luxury|budget|mid-range|affordable|high-end)",
+                r"(?:adventure|relaxation|cultural|family-friendly|romantic|solo|group)",
+                r"(?:outdoor|indoor|sightseeing|shopping|nightlife|food|history)"
+            ],
+            PLANNING_STAGES["ACCOMMODATION"]: [
+                r"(?:hotel|hostel|resort|airbnb|vacation rental|bed and breakfast|camping)"
+            ],
+            PLANNING_STAGES["FOOD"]: [
+                r"(?:local cuisine|international|fast food|fine dining|street food|vegetarian|vegan|seafood)"
+            ]
+        }
+        
+        # Check if we should add buttons based on the current stage
+        if current_stage in predefined_options and predefined_options[current_stage]:
+            # Use predefined options for this stage
+            options = predefined_options[current_stage]
+            modified_response = response + "\n\n*Click a button below to quickly select an option:*"
+            return modified_response, options
+        elif current_stage in option_patterns:
+            # Try to extract options from the response
+            options = []
+            for pattern in option_patterns[current_stage]:
+                matches = re.findall(pattern, response.lower())
+                options.extend(matches)
+            
+            # Remove duplicates and limit to 5 options (Discord UI constraint)
+            options = list(set(options))[:5]
+            
+            # Capitalize options for better presentation
+            options = [opt.capitalize() for opt in options]
+            
+            if options:
+                # Add a note about button options to the response
+                modified_response = response + "\n\n*Click a button below to quickly select an option:*"
+                return modified_response, options
+        
+        # Default: no buttons
+        return response, None
+    
+    async def process_button_selection(self, interaction, option, user_id, channel):
+        """Process a button selection and generate a response."""
+        # Add the user's selection to history
+        self.add_to_history(user_id, "user", option)
+        
+        # Update travel data based on the selection
+        self.extract_travel_information(user_id, option)
+        
+        # Generate a response to the selection
+        context_prompt = self.get_context_prompt(user_id)
+        
+        # Construct messages with system prompt, history and context
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": context_prompt}
+        ]
+        messages.extend(self.get_history(user_id))
+        
+        # Get response from Mistral
+        response = await self.client.chat.complete_async(
+            model=MISTRAL_MODEL,
+            messages=messages,
+        )
+        
+        assistant_content = response.choices[0].message.content
+        
+        # Check if we should enhance the response with API data
+        enhanced_content = await self.enhance_response_with_api_data(user_id, assistant_content)
+        
+        # Check if we should add button options
+        modified_content, new_button_options = self.get_button_options(user_id, enhanced_content)
+        
+        # Add the assistant's response to history
+        self.add_to_history(user_id, "assistant", enhanced_content)
+        
+        # Get the actual channel object if we have an interaction
+        if hasattr(interaction, 'channel') and interaction.channel:
+            channel = interaction.channel
+        
+        # Send the response
+        if new_button_options:
+            # Define a new callback for the buttons in this response
+            async def next_button_callback(interaction, option):
+                await self.process_button_selection(interaction, option, user_id, channel)
+            
+            await send_buttons_message(channel, modified_content, new_button_options, next_button_callback)
+        else:
+            await channel.send(modified_content)
+    
     async def run(self, message: discord.Message):
         """Process a message and generate a response using conversation history."""
         user_id = str(message.author.id)
@@ -272,8 +414,21 @@ Use this real data to enhance your itinerary recommendations. Include specific a
         # Check if we should enhance the response with API data
         enhanced_content = await self.enhance_response_with_api_data(user_id, assistant_content)
         
+        # Check if we should add button options
+        modified_content, button_options = self.get_button_options(user_id, enhanced_content)
+        
         # Add the assistant's response to history
         self.add_to_history(user_id, "assistant", enhanced_content)
+        
+        # If we have button options, send them with the message
+        if button_options:
+            # Define a callback for when a button is pressed
+            async def button_callback(interaction, option):
+                await self.process_button_selection(interaction, option, user_id, message.channel)
+            
+            # Send the message with buttons
+            await send_buttons_message(message, modified_content, button_options, button_callback)
+            return ""  # Return empty string since we've already sent the message
         
         return enhanced_content
     
@@ -282,33 +437,61 @@ Use this real data to enhance your itinerary recommendations. Include specific a
         user_data = self.travel_data[user_id]
         current_stage = user_data["stage"]
         
-        # TODO: Add more sophisticated extraction logic
-        
-        # Extract locations
+        # Check for location information
         if current_stage == PLANNING_STAGES["INITIAL"] or current_stage == PLANNING_STAGES["LOCATION"]:
-            if "go to" in message.lower() or "visit" in message.lower() or "traveling to" in message.lower():
-                # Simple extraction - in reality, you'd want to use NER or similar
+            location_indicators = ["visit", "go to", "travel to", "traveling to", "destination", "want to see"]
+            
+            # Check if the message contains location information
+            if any(indicator in message.lower() for indicator in location_indicators):
+                # Simple extraction - in a real implementation, you'd want to use NER
                 user_data["stage"] = PLANNING_STAGES["DATES"]
                 
-        # Extract dates
+                # Try to extract locations (very basic implementation)
+                potential_locations = re.findall(r'(?:visit|go to|travel to|traveling to|want to see)\s+([A-Za-z\s,]+)', message.lower())
+                if potential_locations:
+                    # Clean up the extracted locations
+                    locations = [loc.strip() for loc in potential_locations[0].split(',')]
+                    user_data["locations"].extend(locations)
+        
+        # Check for date information
         elif current_stage == PLANNING_STAGES["DATES"]:
-            if "from" in message.lower() and "to" in message.lower() or "between" in message.lower():
+            date_indicators = ["from", "to", "between", "during", "in", "next week", "next month", "this summer", "this winter", "flexible"]
+            
+            if any(indicator in message.lower() for indicator in date_indicators):
                 user_data["stage"] = PLANNING_STAGES["PREFERENCES"]
                 
-        # Extract preferences
+                # Store the date information (simplified)
+                user_data["dates"]["text"] = message
+        
+        # Check for preference information
         elif current_stage == PLANNING_STAGES["PREFERENCES"]:
-            if "luxury" in message.lower() or "adventure" in message.lower() or "family" in message.lower():
+            preference_indicators = ["luxury", "budget", "adventure", "cultural", "family", "romantic", "solo", "group"]
+            
+            if any(indicator in message.lower() for indicator in preference_indicators):
                 user_data["stage"] = PLANNING_STAGES["ACCOMMODATION"]
                 
-        # Extract accommodation preferences
+                # Store the preference information
+                user_data["preferences"].append(message)
+        
+        # Check for accommodation information
         elif current_stage == PLANNING_STAGES["ACCOMMODATION"]:
-            if "hotel" in message.lower() or "airbnb" in message.lower() or "hostel" in message.lower():
+            accommodation_indicators = ["hotel", "hostel", "resort", "airbnb", "vacation rental", "bed and breakfast", "camping"]
+            
+            if any(indicator in message.lower() for indicator in accommodation_indicators):
                 user_data["stage"] = PLANNING_STAGES["FOOD"]
                 
-        # Extract food preferences
+                # Store the accommodation preference
+                user_data["accommodation"]["preference"] = message
+        
+        # Check for food information
         elif current_stage == PLANNING_STAGES["FOOD"]:
-            if "restaurant" in message.lower() or "cuisine" in message.lower() or "food" in message.lower():
+            food_indicators = ["cuisine", "food", "restaurant", "dining", "vegetarian", "vegan", "local", "international"]
+            
+            if any(indicator in message.lower() for indicator in food_indicators):
                 user_data["stage"] = PLANNING_STAGES["ITINERARY"]
+                
+                # Store the food preference
+                user_data["food"]["preference"] = message
     
     def get_context_prompt(self, user_id):
         """Get contextual prompt based on current planning stage."""
