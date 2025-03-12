@@ -82,25 +82,39 @@ async def on_message(message: discord.Message):
             logger.info(f"Processing message from {message.author}: {message.content}")
 
             # Process the message with the agent
+            logger.info("Calling agent.run()")
             response = await agent.run(message)
+            logger.info(f"Got response from agent, length: {len(response)}")
 
             # Only send the response if it's not empty
             if response:
+                logger.info("Preparing to send response to Discord")
                 # Split response if it's too long for a single Discord message
                 if len(response) <= 2000:
+                    logger.info("Sending single message response")
                     await message.reply(response)
+                    logger.info("Response sent successfully")
                 else:
                     # Split into chunks of 2000 characters (Discord's message limit)
+                    logger.info(
+                        f"Splitting response into chunks (total length: {len(response)})"
+                    )
                     chunks = [
                         response[i : i + 2000] for i in range(0, len(response), 2000)
                     ]
-                    for chunk in chunks:
+                    for i, chunk in enumerate(chunks):
+                        logger.info(f"Sending chunk {i+1}/{len(chunks)}")
                         await message.channel.send(chunk)
+                        logger.info(f"Chunk {i+1} sent successfully")
                         # Brief delay to maintain message order
                         await asyncio.sleep(0.5)
+            else:
+                logger.warning(
+                    "Empty response received from agent, not sending message"
+                )
 
         except Exception as e:
-            logger.error(f"Error processing message: {e}")
+            logger.error(f"Error processing message: {e}", exc_info=True)
             await message.reply(
                 "Sorry, I encountered an error while processing your request. Please try again later."
             )
@@ -114,20 +128,23 @@ async def help_command(ctx):
 I'm your AI travel planning assistant! Here's how I can help you plan your next adventure:
 
 - Suggest destinations based on your interests, budget, and schedule
+- Provide weather information to help you choose the best travel dates
 - Recommend attractions, activities, and local experiences
 - Provide transportation and accommodation information
-- Create personalized itineraries
+- Create personalized itineraries with weather considerations
 - Offer tips on budgeting, packing, and travel safety
 
 **Planning Process:**
 1. First, I'll ask about your destination(s)
 2. Then, your travel dates
-3. Next, your travel preferences (luxury, adventure, etc.)
-4. Whether you want accommodation recommendations
-5. Finally, your food preferences
+3. Next, your weather preferences (warm/cool, rainy/dry)
+4. Then, your travel preferences (luxury, adventure, etc.)
+5. Whether you want accommodation recommendations
+6. Finally, your food preferences
 
 **Commands:**
 `!plan` - Start a new travel planning session
+`!weather [location]` - Check the current weather for any location
 `!clear` - Clear your conversation history
 `!help` - Show this help message
 
@@ -223,34 +240,38 @@ async def process_button_selection(interaction, option, author, channel):
             agent.extract_travel_information(user_id, option)
             await process_button_selection(interaction, option, author, channel)
 
-        # Split content if it's too long, but still send with buttons
-        if len(modified_content) > 2000:
-            # First send the content in chunks
-            chunks = [
-                modified_content[i : i + 1900]
-                for i in range(0, len(modified_content), 1900)
-            ]
+            # Split content if it's too long, but still send with buttons
+            if len(modified_content) > 2000:
+                # First send the content in chunks
+                chunks = [
+                    modified_content[i : i + 1900]
+                    for i in range(0, len(modified_content), 1900)
+                ]
 
-            # Send all chunks except the last one
-            for i in range(len(chunks) - 1):
-                await channel.send(chunks[i])
-                print(f"Sent chunk {i+1} of {len(chunks)}, length: {len(chunks[i])}")
-                await asyncio.sleep(0.5)
+                # Send all chunks except the last one
+                for i in range(len(chunks) - 1):
+                    await channel.send(chunks[i])
+                    print(
+                        f"Sent chunk {i+1} of {len(chunks)}, length: {len(chunks[i])}"
+                    )
+                    await asyncio.sleep(0.5)
 
-            # Send the last chunk with buttons
-            await send_buttons_message(
-                channel,
-                chunks[-1] + "\n\n*Click a button below to quickly select an option:*",
-                new_button_options,
-                next_button_callback,
-            )
-            print(f"Sent final chunk with buttons, length: {len(chunks[-1])}")
-        else:
-            # Content fits in one message, send with buttons
-            await send_buttons_message(
-                channel, modified_content, new_button_options, next_button_callback
-            )
-            print(f"Sent content with buttons, length: {len(modified_content)}")
+                # Send the last chunk with buttons
+                await send_buttons_message(
+                    channel,
+                    chunks[-1]
+                    + "\n\n*Click a button below to quickly select an option:*",
+                    new_button_options,
+                    next_button_callback,
+                )
+                print(f"Sent final chunk with buttons, length: {len(chunks[-1])}")
+            else:
+                # Content fits in one message, send with buttons
+                await send_buttons_message(
+                    channel, modified_content, new_button_options, next_button_callback
+                )
+                print(f"Sent content with buttons, length: {len(modified_content)}")
+
     else:
         # For regular messages without buttons, handle long content
         if len(modified_content) > 2000:
@@ -277,11 +298,12 @@ async def start_plan(ctx):
     # Clear any existing conversation
     agent.conversation_history[user_id] = []
 
-    # Reset travel data
+    # Reset travel data with the new weather_preferences field
     agent.travel_data[user_id] = {
         "stage": 0,  # INITIAL stage
         "locations": [],
         "dates": {},
+        "weather_preferences": {},  # New field for weather preferences
         "preferences": [],
         "accommodation": {},
         "food": {},
@@ -377,6 +399,26 @@ I'll help you create a personalized travel itinerary. To get started, I'll need 
         popular_destinations,
         destination_callback,
     )
+
+
+# Add a new command for weather lookup
+@bot.command(name="weather", help="Get current weather for a location.")
+async def weather_lookup(ctx, *, location):
+    """Look up current weather for a location."""
+    if not hasattr(agent, "weather_stack") or agent.weather_stack is None:
+        await ctx.send("Weather service is not available.")
+        return
+
+    try:
+        weather_data = await agent.get_weather_data(location)
+        if "error" in weather_data:
+            await ctx.send(f"Error getting weather data: {weather_data['error']}")
+            return
+
+        weather_description = agent.weather_stack.get_weather_description(weather_data)
+        await ctx.send(f"**Weather Lookup:** {weather_description}")
+    except Exception as e:
+        await ctx.send(f"Error processing weather request: {e}")
 
 
 # Start the bot, connecting it to the gateway
